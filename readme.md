@@ -46,7 +46,7 @@ The data cleaning process involved preparing the raw data for subsequent analysi
 - Converted data types as follows:
    - Converted 'assigned_to' to integer data type from float.
    - Converted call_id to int from object
-
+ whilst correcting the error in the first row of the column. changing i"ageentsgradelevel"  to '1'
 #### 2.3. Data Validation and Correction
 
 - Conducted data validation to identify and correct data integrity issues.
@@ -59,3 +59,7 @@ The data cleaning process involved preparing the raw data for subsequent analysi
 
 The data cleaning process improved the dataset's quality and readiness for KPI calculation and analysis.
 
+#### 2.5. Data Observation Notes
+
+- While understanding the dataset, I noticed that the agent grade level could not be linked to any agent id.
+- Same unique agent Id could be linked to different grade levels.

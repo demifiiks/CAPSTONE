@@ -1,68 +1,117 @@
-import psycopg2
 import pandas as pd
-import boto3
+import os 
 from configparser import ConfigParser
+from utils.helper import create_s3_bucket, connect_to_warehouse, DEV_SCHEMA, RAW_SCHEMA, s3_lake_path, BUCKET_NAME
+from utils.clean import main
+from sql_statements.create import schema, raw_data_schema, transformed_kpi
+from sql_statements.transform import insert_into_transformed_kpi
+from utils.constants import kpi_tables
 
-#reading the raw dataset calldetails and call log"
-call_details = pd.read_csv('call details.csv')
-call_log = pd.read_csv('call log.csv')
+config = ConfigParser()
+config.read('.env')
 
-print('successful')
+region = config['AWS']['region']
+bucket_name = config['AWS']['bucket_name']
 
-### CLEANING THE DATASET
-# CREATING A COPY OF THE 2 DATASET
+access_key = config['AWS']['access_key']
+secret_key =  config['AWS']['secret_key']
+ 
+host = config['DB_CRED']['host']
+username = config['DB_CRED']['username']
+password = config['DB_CRED']['password']
+database = config['DB_CRED']['database']
+ 
+DWH_HOST = config['DWH']['DWH_HOST']
+DWH_USER = config['DWH']['DWH_USER']
+DWH_DB = config['DWH']['DWH_DB']
+DWH_PASSWEORD = config['DWH']['DWH_PASSWORD']
 
-call_details_copy = call_details.copy()
-call_log_copy = call_log.copy()
+# dwh_host = config['DWH']['dwh_host']
+# dwh_username = config['DWH']['dwh_username']
+# dwh_password = config['DWH']['dwh_password']
+# dwh_database = config['DWH']['dwh_database']
+# role =config['DWH']['role']
 
-# rename column header
-call_details_copy.rename(columns= {'callID':'call_id', 'callDurationInSeconds': 'duration_of_calls_in_sec', 'agentsGradeLevel': 'agents_grade_level', 'callType': 'call_type', 'callEndedByAgent':'call_ended_by_agent'}, inplace=True)
+# Create the RAW and DEV schemas
+def create_raw_schema():
+    conn = connect_to_warehouse()
+    cursor = conn.cursor()
+    print('Create raw schema')
+    cursor.execute(schema.format(RAW_SCHEMA))
+    conn.commit()
+    cursor.close()
 
-print('successful')
+def create_dev_schema():
+    conn = connect_to_warehouse()
+    cursor = conn.cursor()
+    print('Create dev schema')
+    cursor.execute(transformed_kpi.format(DEV_SCHEMA))
+    conn.commit()
+    cursor.close()
 
-#data cleaning:
-# removing the '-' in "in-bound"
-call_details_copy['call_type'] = call_details_copy['call_type'].str.replace('-','')
+# Create schema  and TRANSFORMED tables
+def create_raw_tables():
+    conn = connect_to_warehouse()
+    cursor = conn.cursor()
+    for query in raw_data_schema:
+        print(f"{query[:35]}")
+        cursor.execute(query.format(RAW_SCHEMA))
+        conn.commit()
+    print('All RAW tables created')
+    cursor.close()
 
-# capitalizing the first letter and changing the rem to lower case
-call_details_copy['call_type']= call_details_copy['call_type'].str.lower().str.capitalize()
+def create_transformed_tables():
+    conn = connect_to_warehouse()
+    cursor = conn.cursor()
+    for query in kpi_tables:
+        print(f"{query[:45]}")
+        cursor.execute(query.format(DEV_SCHEMA))
+        conn.commit()
+    print('All TRANSFORMED tables created')
+    cursor.close()
 
-# removing white spaces
-call_details_copy['call_type'] = call_details_copy['call_type'].str.strip('  ')
+# Copy data from S3 to DWH
+def copy_from_s3_dwh():
+    try:
+        dwh_conn = connect_to_warehouse()
+        cursor = dwh_conn.cursor()
+        for table in kpi_tables:
+            print(f"Copying {table} from S3 to DWH")
+            table_copy_query = f"""
+            copy {RAW_SCHEMA}.{table}
+            from '{s3_lake_path.format(BUCKET_NAME, table)}'
+            iam_role '{DWH_ROLE}' # Configure your DWH
+            delimiter ','
+            ignoreheader 1;
+        """
+            cursor.execute(table_copy_query)
+            dwh_conn.commit()
+        cursor.close()
+        dwh_conn.close()
+    except Exception as e:
+        print(e)
 
-# create a copy dataframe df2_copy
+# Insert data into TRANSFORMED tables
+def insert_into_trans_tables():
+    conn = connect_to_warehouse()
+    cursor = conn.cursor()
+    for query in insert_into_transformed_kpi:
+        print(f"{query[:20]}")
+        cursor.execute(query.format(DEV_SCHEMA))
+        conn.commit()
+    print('All TRANSFORMED tables inserted')
+    cursor.close()
 
-call_log_copy = call_log.copy()
-#fill nan values
+# Extract and process data using your `main` function
+def extract_all_jobs():
+    for job in main:
+        job()
 
-call_log_copy['resolutionDurationInHours'] = call_log_copy['resolutionDurationInHours'].fillna(value=0)
-
-call_log_copy['assignedTo'] = call_log_copy['assignedTo'].fillna(call_log_copy['agentID'])
-
-#change assignedto datatype from float to int
-call_log_copy['assignedTo'] = call_log_copy['assignedTo'].astype(int)
-call_log_copy.head()
-
-# adjusting all the characters in status 
-call_log_copy['status']= call_log_copy['status'].str.lower().str.capitalize()
-
-
-#renaming the columns
-call_log_copy.rename(columns={'callerID': 'caller_id', 
-                         'agentID': 'agent_id', 
-                         'complaintTopic':'complaint', 
-                         'assignedTo': 'assigned_to', 
-                         'resolutionDurationInHours':'resolution_duration_in_hours'}, 
-                         inplace=True)
-
-#change the first data in call_id to 1
-call_details_copy['call_id'] = call_details_copy['call_id'].str.replace('ageentsGradeLevel','1')
-
-# changing the datatype of call _id
-call_details_copy['call_id'] = call_details_copy['call_id'].astype(int)
-
-#saving the 2 cleaned datset to a csv file
-cleaned_call_details = call_details_copy.to_csv('cleaned_call_details.csv', index=False)
-cleaned_call_log = call_log_copy.to_csv('cleaned_call_log.csv', index=False)
-
-print('successful')
+if __name__ == "__main__":
+    create_raw_schema()
+    create_dev_schema()
+    create_raw_tables()
+    create_transformed_tables()
+    copy_from_s3_dwh()
+    insert_into_trans_tables()
+    extract_all_jobs()
